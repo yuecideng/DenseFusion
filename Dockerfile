@@ -21,11 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3.6 pytho
 # RUN curl https://bootstrap.pypa.io/pip/3.5/get-pip.py --output get-pip.py
 
 # Science libraries and other common packages
-RUN pip3 --no-cache-dir install \
+RUN pip3 --no-cache-dir install -i https://mirrors.aliyun.com/pypi/simple/ \
     numpy scipy pyyaml cffi pyyaml matplotlib Cython requests opencv-python
 
 # Tensorflow
-RUN pip3 install torch==1.6.0 torchvision==0.7.0
+RUN pip3 install -i https://mirrors.aliyun.com/pypi/simple/ torch==1.6.0 torchvision==0.7.0
 
 # Expose port for TensorBoard
 EXPOSE 6006
