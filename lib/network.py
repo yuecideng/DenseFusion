@@ -15,6 +15,7 @@ import numpy as np
 import pdb
 import torch.nn.functional as F
 from lib.pspnet import PSPNet
+from IPython import embed
 
 psp_models = {
     'resnet18': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=512, deep_features_size=256, backend='resnet18'),
@@ -121,10 +122,11 @@ class PoseNet(nn.Module):
         cx = torch.sigmoid(self.conv4_c(cx)).view(bs, self.num_obj, 1, self.num_points)
         
         b = 0
+
         out_rx = torch.index_select(rx[b], 0, obj[b])
         out_tx = torch.index_select(tx[b], 0, obj[b])
         out_cx = torch.index_select(cx[b], 0, obj[b])
-        
+
         out_rx = out_rx.contiguous().transpose(2, 1).contiguous()
         out_cx = out_cx.contiguous().transpose(2, 1).contiguous()
         out_tx = out_tx.contiguous().transpose(2, 1).contiguous()

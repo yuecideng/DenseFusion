@@ -35,7 +35,7 @@ iteration = 4
 bs = 1
 dataset_config_dir = 'datasets/linemod/dataset_config'
 output_result_dir = 'experiments/eval_result/linemod'
-knn = KNearestNeighbor(1)
+# knn = KNearestNeighbor(1)
 
 estimator = PoseNet(num_points = num_points, num_obj = num_objects)
 estimator.cuda()
@@ -56,7 +56,7 @@ criterion_refine = Loss_refine(num_points_mesh, sym_list)
 
 diameter = []
 meta_file = open('{0}/models_info.yml'.format(dataset_config_dir), 'r')
-meta = yaml.load(meta_file)
+meta = yaml.load(meta_file, Loader= yaml.FullLoader)
 for obj in objlist:
     diameter.append(meta[obj]['diameter'] / 1000.0 * 0.1)
 print(diameter)
@@ -123,7 +123,7 @@ for i, data in enumerate(testdataloader, 0):
     if idx[0].item() in sym_list:
         pred = torch.from_numpy(pred.astype(np.float32)).cuda().transpose(1, 0).contiguous()
         target = torch.from_numpy(target.astype(np.float32)).cuda().transpose(1, 0).contiguous()
-        inds = knn(target.unsqueeze(0), pred.unsqueeze(0))
+        inds = KNearestNeighbor.apply(target.unsqueeze(0), pred.unsqueeze(0))
         target = torch.index_select(target, 1, inds.view(-1) - 1)
         dis = torch.mean(torch.norm((pred.transpose(1, 0) - target.transpose(1, 0)), dim=1), dim=0).item()
     else:
