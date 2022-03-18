@@ -23,6 +23,7 @@ class BOPDataset(data.Dataset):
         self.mode = mode
         print('Init {} dataset in {} mode.'.format(dataset_name, self.mode))
 
+        self.synthesis = False
         # load model and config info
         # model is open3d.geometry.TriangleMesh object
         self.model_info = self.__init_model_info()
@@ -75,30 +76,50 @@ class BOPDataset(data.Dataset):
             print('Load test targets json fail.')
         return targets
 
+    def __check_synthesis(self, model_dicts):
+        for model_idx in model_dicts:
+            if 'name' in model_dicts[model_idx]:
+                return True
+        return False
+
     def __init_model_info(self):
         model_path = os.path.join(self.root, self.dataset_name, 'models')
         model_list = {}
         try:
             f = open(os.path.join(model_path, 'models_info.json'))
             model_list = json.load(f)
-            str_list = os.listdir(model_path)
-            model_names = [
-                os.path.join(model_path, s) for s in str_list
-                if s.endswith('.ply')
-            ]
-            model_names.sort(key=lambda x: int(re.findall(r'\d+', x)[-1]))
-            print('Load {} models.'.format(len(model_names)))
-            self.num_models = len(model_names)
-            f.close()
 
-            for i, (key, val) in enumerate(model_list.items()):
-                mesh = o3d.io.read_triangle_mesh(model_names[i])
-                mesh = mesh.scale(0.001, np.array([0, 0, 0]))
-                model_list[key]['mesh'] = mesh
+            # check whether the dataset is synthesis or not
+            self.synthesis = self.__check_synthesis(model_list)
 
-                cloud = o3d.io.read_point_cloud(model_names[i])
-                cloud = cloud.scale(0.001, np.array([0, 0, 0]))
-                model_list[key]['cloud'] = cloud
+            if not self.synthesis:
+                str_list = os.listdir(model_path)
+                model_names = [
+                    os.path.join(model_path, s) for s in str_list
+                    if s.endswith('.ply')
+                ]
+                model_names.sort(key=lambda x: int(re.findall(r'\d+', x)[-1]))
+                print('Load {} models.'.format(len(model_names)))
+                self.num_models = len(model_names)
+                f.close()
+
+                for i, (key, val) in enumerate(model_list.items()):
+                    mesh = o3d.io.read_triangle_mesh(model_names[i])
+                    mesh = mesh.scale(0.001, np.array([0, 0, 0]))
+                    model_list[key]['mesh'] = mesh
+
+                    cloud = o3d.io.read_point_cloud(model_names[i])
+                    cloud = cloud.scale(0.001, np.array([0, 0, 0]))
+                    model_list[key]['cloud'] = cloud
+            else:
+                self.mask_combined = True
+                for i, (key, val) in enumerate(model_list.items()):
+                    name = val['name']
+                    mesh = o3d.io.read_triangle_mesh(
+                        os.path.join(model_path, name, name + '0.obj'))
+                    cloud = o3d.geometry.PointCloud(mesh.vertices)
+                    model_list[key]['mesh'] = mesh
+                    model_list[key]['cloud'] = cloud
 
         except:
             print('Load model info json fail.')
@@ -189,12 +210,15 @@ class BOPDataset(data.Dataset):
             [np.ndarray, np.ndarray, tuple[5], List]: 
             (rgb, depth, (fx, fy, cx, cy, depth_scale), obj_infos)
         """
-        name_no_zero = str(int(name))
+        if self.synthesis:
+            name_no_zero = name
+        else:
+            name_no_zero = str(int(name))
         length = name.__len__()
         if name_no_zero not in self.data_info[scene][
                 'scene_camera'] or scene not in self.data_info:
             print('No data found.')
-            return None, None, None, None, None
+            return None, None, None, None
 
         scene_data_dict = self.data_info[scene]
         data_name = name + '.png'
@@ -203,7 +227,6 @@ class BOPDataset(data.Dataset):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         depth = cv2.imread(os.path.join(scene_data_dict['depth'], data_name),
                            cv2.IMREAD_ANYDEPTH)
-
         shape = img.shape
 
         # check mask is combined or separated
@@ -213,19 +236,26 @@ class BOPDataset(data.Dataset):
                 os.path.join(scene_data_dict['mask'], data_name),
                 cv2.IMREAD_ANYDEPTH)
             # check mask data type
+            # if mask is in combined mode, the data type must be uint16
             if str(mask_combined.dtype) != 'uint16':
                 print('Mask is not uint16.')
-                return None, None, None, None, None
+                return None, None, None, None
 
         K = scene_data_dict['scene_camera'][name_no_zero]['cam_K']
-        depth_scale = 1.0
 
-        if self.dataset_name == 'ycbv':
-            depth_scale *= 10000
+        if self.synthesis:
+            depth_scale = scene_data_dict['scene_camera'][name_no_zero][
+                'depth_scale']
         else:
-            depth_scale *= 1000
+            if self.dataset_name == 'ycbv':
+                depth_scale = 10000.0
+            else:
+                depth_scale = 1000.0
 
-        intrin = (K[0], K[4], K[2], K[5], depth_scale)
+        if not self.synthesis:
+            intrin = (K[0], K[4], K[2], K[5], depth_scale)
+        else:
+            intrin = (K[0][0], K[1][1], K[0][2], K[1][2], depth_scale)
 
         obj_infos = []
         class_id = {}
@@ -233,9 +263,8 @@ class BOPDataset(data.Dataset):
             gt_info = scene_data_dict['scene_gt_info'][name_no_zero][obj]
             gt = scene_data_dict['scene_gt'][name_no_zero][obj]
             obj_info = {}
-
             if 'bbox_visib' not in gt_info:
-                bbox = gt['bbox_obj']
+                bbox = gt_info['bbox_obj']
             else:
                 bbox = gt_info['bbox_visib']
             for i, val in enumerate(bbox):
@@ -250,16 +279,15 @@ class BOPDataset(data.Dataset):
             gt_pose[:3, :3] = np.array(R).reshape((3, 3))
             gt_pose[:3, 3] = np.array(t) / 1000
             obj_info['gt_pose'] = gt_pose
-            obj_id = gt['obj_id']
-
-            if obj_id in class_id:
-                class_id[obj_id] += 1
-            else:
-                class_id[obj_id] = 1
-            obj_info['obj_id'] = obj_id
-            obj_info['inst_count'] = class_id[obj_id]
 
             if self.mask_combined is False:
+                obj_id = gt['obj_id']
+                if obj_id in class_id:
+                    class_id[obj_id] += 1
+                else:
+                    class_id[obj_id] = 1
+                obj_info['obj_id'] = obj_id
+                obj_info['inst_count'] = class_id[obj_id]
                 mask_name = os.path.join(
                     scene_data_dict['mask'],
                     name + '_' + str(obj).zfill(length) + '.png')
@@ -270,6 +298,19 @@ class BOPDataset(data.Dataset):
                     for i in range(len(indice[0]))
                 ]
                 obj_info['mask'] = indice_list
+            else:
+                inst_id = gt['inst_id']
+                if len(inst_id) == 4:
+                    obj_info['obj_id'] = int(inst_id[0])
+                elif len(inst_id) == 5:
+                    obj_info['obj_id'] = int(inst_id[:2])
+                indice = np.where(mask_combined == int(inst_id))
+                indice_list = [
+                    indice[0][i] * shape[1] + indice[1][i]
+                    for i in range(len(indice[0]))
+                ]
+                obj_info['mask'] = indice_list
+
             obj_infos.append(obj_info)
 
         return img, depth, intrin, obj_infos
@@ -291,7 +332,12 @@ class BOPDataset(data.Dataset):
                 if not self.mask_combined:
                     model_names.append(instance['obj_id'])
                 else:
-                    pass
+                    inst_id = instance['inst_id']
+                    if len(inst_id) == 4:
+                        model_names.append(int(inst_id[0]))
+                    elif len(inst_id) == 5:
+                        model_names.append(int(inst_id[:2]))
+
         model_names = set(model_names)
         models = {}
         for name in model_names:
@@ -310,6 +356,18 @@ class DenseFusionDataset(BOPDataset):
                  noise_t=None,
                  sym_list=[],
                  refine=True):
+        """_summary_
+
+        Args:
+            root (string): path to root of Dataset father folder
+            dataset_name (string): name of the dataset
+            mode (str, optional): 'train' | 'valid' | 'test'. Defaults to 'test'.
+            points_num (tuple, optional): (ponits_num, small_model_num, 
+                large_model_num). Defaults to (500, 500, 500).
+            noise_t (float, optional): noise add to translation. Defaults to None.
+            sym_list (list, optional): list of symetry object. Defaults to [].
+            refine (bool, optional): whether use refiner. Defaults to True.
+        """
         super(DenseFusionDataset, self).__init__(root, dataset_name, mode)
         self.noise_t = noise_t if noise_t is not None else 0.0
         self.norm = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -340,7 +398,10 @@ class DenseFusionDataset(BOPDataset):
         for scene_name in self.data_info:
             scene_data_dict = self.data_info[scene_name]
             for sample in scene_data_dict['scene_gt']:
-                sample_name = sample.zfill(6) + '.png'
+                if self.synthesis:
+                    sample_name = sample + '.png'
+                else:
+                    sample_name = sample.zfill(6) + '.png'
                 gt_info_dict = scene_data_dict['scene_gt_info'][sample]
                 camera_dict = scene_data_dict['scene_camera'][sample]
                 for i, instance in enumerate(
@@ -350,11 +411,10 @@ class DenseFusionDataset(BOPDataset):
                     self.list_depth.append(
                         os.path.join(scene_data_dict['depth'], sample_name))
                     if self.mask_combined:
-                        # TODO: should be implemented based on final structure
                         self.list_mask.append(
                             os.path.join(scene_data_dict['mask'], sample_name))
-                        obj_id = instance['inst_id']
-                        self.list_obj.append(obj_id)
+                        inst_id = instance['inst_id']
+                        self.list_obj.append(inst_id)
                     else:
                         obj_id = instance['obj_id']
                         mask_name = sample.zfill(6) + '_' + str(i).zfill(
@@ -369,7 +429,12 @@ class DenseFusionDataset(BOPDataset):
                     else:
                         gt['bbox'] = gt_info_dict[i]['bbox_obj']
                     K = camera_dict['cam_K']
-                    gt['cam_K'] = [K[0], K[4], K[2], K[5]]
+                    depth_scale = camera_dict['depth_scale']
+                    gt['depth_scale'] = depth_scale
+                    if not self.synthesis:
+                        gt['cam_K'] = [K[0], K[4], K[2], K[5]]
+                    else:
+                        gt['cam_K'] = [K[0][0], K[1][1], K[0][2], K[1][2]]
 
                     self.list_gt.append(gt)
 
@@ -381,12 +446,23 @@ class DenseFusionDataset(BOPDataset):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         depth = cv2.imread(self.list_depth[index], cv2.IMREAD_ANYDEPTH)
         mask = cv2.imread(self.list_mask[index], cv2.IMREAD_ANYDEPTH)
-        obj = self.list_obj[index]
-        data_name = self.list_data_name[index]
         gt = self.list_gt[index]
+        if not self.synthesis:
+            obj = self.list_obj[index]
+        else:
+            inst_id = self.list_obj[index]
+            if len(inst_id) == 4:
+                obj = int(inst_id[0])
+            elif len(inst_id) == 5:
+                obj = int(inst_id[:2])
+            inst_id = int(inst_id)
 
         mask_depth = ma.getmaskarray(ma.masked_not_equal(depth, 0))
-        mask_label = ma.getmaskarray(ma.masked_equal(mask, np.array(255)))
+        if self.mask_combined:
+            mask_label = ma.getmaskarray(
+                ma.masked_equal(mask, np.array(inst_id)))
+        else:
+            mask_label = ma.getmaskarray(ma.masked_equal(mask, np.array(255)))
 
         valid_mask = mask_depth * mask_label
 
@@ -395,7 +471,10 @@ class DenseFusionDataset(BOPDataset):
         img_masked = img_masked[:, rmin:rmax, cmin:cmax]
 
         target_r = np.resize(np.array(gt['cam_R_m2c']), (3, 3))
-        target_t = np.array(gt['cam_t_m2c']) / 1000.0
+        if self.synthesis:
+            target_t = np.array(gt['cam_t_m2c'])
+        else:
+            target_t = np.array(gt['cam_t_m2c']) / 1000.0
         noise_t = np.array(
             [random.uniform(-self.noise_t, self.noise_t) for i in range(3)])
 
@@ -425,7 +504,10 @@ class DenseFusionDataset(BOPDataset):
         choose = np.array([choose])
 
         fx, fy, cx, cy = gt['cam_K']
-        depth_scale = 10000.0 if self.dataset_name == 'ycbv' else 1000.0
+        if self.synthesis:
+            depth_scale = gt['depth_scale']
+        else:
+            depth_scale = 10000.0 if self.dataset_name == 'ycbv' else 1000.0
         pt2 = depth_masked / depth_scale
         pt0 = (ymap_masked - cx) * pt2 / fx
         pt1 = (xmap_masked - cy) * pt2 / fy
@@ -436,13 +518,13 @@ class DenseFusionDataset(BOPDataset):
         model_pcd = self.get_model(str(obj))
         total_num = len(model_pcd.points)
         dellist = [j for j in range(0, total_num)]
-        # TODO: use fps here
         if self.refine:
             ratio = self.large_model_num / len(model_pcd.points)
             dellist = random.sample(dellist, total_num - self.large_model_num)
         else:
             dellist = random.sample(dellist, total_num - self.small_model_num)
         model_points = np.delete(np.asarray(model_pcd.points), dellist, axis=0)
+        # TODO: use fps here
         # model_pcd = model_pcd.get_farthest_point_sample(self.points_num)
 
         target = np.dot(model_points, target_r.T)
@@ -518,26 +600,11 @@ class DenseFusionDataset(BOPDataset):
 
 if __name__ == '__main__':
     from IPython import embed
-    def np2o3d(xyz, normals=None):
-        """convert numpy ndarray to open3D point cloud 
-
-        Args:
-            xyz ([np.ndarray]): [description]
-            normals ([np.ndarray], optional): [description]. Defaults to None.
-
-        Returns:
-            [type]: [description]
-        """
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(xyz)
-        if normals is not None:
-            pcd.normals = o3d.utility.Vector3dVector(normals)
-        return pcd
+    from utils import np2o3d, rgbd_to_pointcloud
 
     dataset = DenseFusionDataset('/home/yuecideng/WorkSpace/Data/BOPDataset',
-                                 'lm',
-                                 'train',
+                                 'a2',
+                                 'test',
                                  points_num=(500, 500, 500))
     loader = torch.utils.data.DataLoader(dataset,
                                          batch_size=1,
